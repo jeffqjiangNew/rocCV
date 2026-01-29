@@ -115,7 +115,7 @@ void RunLengthEncode(std::vector<uint32_t>& in_buffer, std::vector<uint32_t>& ou
         auto end = std::chrono::high_resolution_clock::now();
         auto elapsed = std::chrono::duration<double, std::milli>(end - start).count();
         std::cout << "<Profiling> hipStreamSynchronize() elapsed time for iteration " << i << ": " << elapsed << " ms" << std::endl;
-        float throughput =  in_buf_size * sizeof(in_buffer[0]) / 1024.0 / 1024.0 / 1024.0 * 1000.0 / elapsed;
+        float throughput =  in_buf_size * sizeof(in_buffer[0]) / 1000.0 / 1000.0 / 1000.0 * 1000.0 / elapsed;
         std::cout << "<Profiling> Kernel throughput based on C++ Chrono lib for iteration " << i << ": " << throughput << " GB/s" << std::endl;
 
     }
@@ -187,7 +187,7 @@ void RunLengthEncodeHipCUB(std::vector<uint32_t>& in_buffer, std::vector<uint32_
         auto end = std::chrono::high_resolution_clock::now();
         auto elapsed = std::chrono::duration<double, std::milli>(end - start).count();
         std::cout << "<Profiling> hipStreamSynchronize() elapsed time for iteration " << i << ": " << elapsed << " ms" << std::endl;
-        float throughput =  in_buf_size * sizeof(in_buffer[0]) / 1024.0 / 1024.0 / 1024.0 * 1000.0 / elapsed;
+        float throughput =  in_buf_size * sizeof(in_buffer[0]) / 1000.0 / 1000.0 / 1000.0 * 1000.0 / elapsed;
         std::cout << "<Profiling> hipcub::DeviceRunLengthEncode::Encode throughput based on C++ Chrono lib for iteration " << i << ": " << throughput << " GB/s" << std::endl;
     }
 
