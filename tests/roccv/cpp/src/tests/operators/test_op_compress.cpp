@@ -30,12 +30,14 @@
 #include <hipcub/block/block_load.hpp>
 #include <hipcub/block/block_run_length_decode.hpp>
 #include <hipcub/block/block_store.hpp>
+#include "compress_util.hpp"
 #include "test_helpers.hpp"
 
 using namespace roccv;
 using namespace roccv::tests;
 
 namespace {
+#if 0
 void RunLengthEncodeGolden(uint32_t *input, uint32_t input_size, uint32_t *output, uint32_t* output_size) {
     int pair_index = 0;
     int value = input[0];
@@ -68,18 +70,16 @@ void RunLengthEncodeGolden(uint32_t *input, uint32_t input_size, uint32_t *outpu
     std::cout << std::endl;*/
 }
 
-void GetPrefixSum(hipStream_t stream, void *input, void *output, int num_items) {
+void GetPrefixSum(hipStream_t stream, uint32_t *d_in, uint32_t *d_out, int num_items) {
     void* d_temp_storage     = nullptr;
     size_t temp_storage_bytes = 0;
-    int* d_in = static_cast<int*>(input);
-    int* d_out = static_cast<int*>(output);
 
     HIP_VALIDATE_NO_ERRORS(hipcub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes, d_in, d_out, num_items, stream));
     HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_temp_storage, temp_storage_bytes));
     HIP_VALIDATE_NO_ERRORS(hipcub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes, d_in, d_out, num_items, stream));
     HIP_VALIDATE_NO_ERRORS(hipFree(d_temp_storage));
 }
-
+#endif
 void RunLengthEncode(std::vector<uint32_t>& in_buffer, std::vector<uint32_t>& out_buffer, uint32_t *code_count) {
     int in_buf_size = in_buffer.size();
     int out_buf_size = out_buffer.size();
@@ -107,7 +107,7 @@ void RunLengthEncode(std::vector<uint32_t>& in_buffer, std::vector<uint32_t>& ou
         void *diff_flag_ptr = diff_flag_data.basePtr();
         auto prefix_sum_data = prefix_sum.exportData<TensorDataStrided>();
         void *prefix_sum_ptr = prefix_sum_data.basePtr();
-        GetPrefixSum(stream, diff_flag_ptr, prefix_sum_ptr, in_buf_size);
+        GetPrefixSumHipCUB(stream, static_cast<uint32_t*>(diff_flag_ptr), static_cast<uint32_t*>(prefix_sum_ptr), in_buf_size);
 
         op.get_rl_indexes(stream, prefix_sum, rl_indices, num_pair_d);
 
@@ -182,9 +182,11 @@ void RunLengthEncodeHipCUB(std::vector<uint32_t>& in_buffer, std::vector<uint32_
     for (int i = 0; i < 10; i++) {
         auto start = std::chrono::high_resolution_clock::now();
 
-        HIP_VALIDATE_NO_ERRORS(hipcub::DeviceRunLengthEncode::Encode(nullptr, temp_storage_bytes, d_in, d_value_out, d_run_out, d_runs_count_output, in_buf_size, stream));
+        /*HIP_VALIDATE_NO_ERRORS(hipcub::DeviceRunLengthEncode::Encode(nullptr, temp_storage_bytes, d_in, d_value_out, d_run_out, d_runs_count_output, in_buf_size, stream));
         HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_temp_storage, temp_storage_bytes));
         HIP_VALIDATE_NO_ERRORS(hipcub::DeviceRunLengthEncode::Encode(d_temp_storage, temp_storage_bytes, d_in, d_value_out, d_run_out, d_runs_count_output, in_buf_size, stream));
+        HIP_VALIDATE_NO_ERRORS(hipFree(d_temp_storage));*/
+        RunLengthEncodeHipCUB(stream, d_in, d_value_out, d_run_out, d_runs_count_output, in_buf_size);
         HIP_VALIDATE_NO_ERRORS(hipStreamSynchronize(stream));
 
         auto end = std::chrono::high_resolution_clock::now();
@@ -318,7 +320,7 @@ void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const ui
         d_decoded_items[offset + i] = value;
     }
 }
-#else
+//#else
 template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
 __global__
 __launch_bounds__(BlockSize)
@@ -418,7 +420,7 @@ void RunLengthDecodeHipCUB_OffsetGPU(std::vector<uint32_t>& in_value_buffer, std
     uint32_t *d_run_buf = nullptr;
     HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_run_buf, in_run_buffer.size() * sizeof(in_run_buffer[0])));
     HIP_VALIDATE_NO_ERRORS(hipMemcpy(d_run_buf, in_run_buffer.data(), in_run_buffer.size() * sizeof(in_run_buffer[0]), hipMemcpyHostToDevice));
-    GetPrefixSum(stream, d_run_buf, d_offset_buf, in_run_buffer.size());
+    GetPrefixSumHipCUB(stream, d_run_buf, d_offset_buf, in_run_buffer.size());
     std::vector<uint32_t> presum_offset_buf(in_run_buffer.size());
     HIP_VALIDATE_NO_ERRORS(hipMemcpy(presum_offset_buf.data(), d_offset_buf, presum_offset_buf.size() * sizeof(presum_offset_buf[0]), hipMemcpyDeviceToHost));
     // Jefftest
@@ -438,7 +440,7 @@ void RunLengthDecodeHipCUB_OffsetGPU(std::vector<uint32_t>& in_value_buffer, std
         auto start = std::chrono::high_resolution_clock::now();
 
         // Calculate output offsets using prefix sum of the runs
-        GetPrefixSum(stream, d_run_buf, d_offset_buf, in_run_buffer.size());
+        GetPrefixSumHipCUB(stream, d_run_buf, d_offset_buf, in_run_buffer.size());
 
         block_run_length_decode_kernel_offset<BlockSize, RunsPerThread, DecodedItemsPerThread><<<dim3(num_blocks), dim3(BlockSize), 0, stream>>>(d_value_buf, d_offset_buf, d_decoded_buf, in_code_size);
         HIP_VALIDATE_NO_ERRORS(hipStreamSynchronize(stream));
