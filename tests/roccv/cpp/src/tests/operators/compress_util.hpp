@@ -115,13 +115,16 @@ void block_run_length_decode_kernel(const uint32_t* d_run_items, const uint32_t*
 template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
 __global__
 __launch_bounds__(BlockSize)
-void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const uint32_t* d_run_offsets, uint32_t* d_decoded_items) {
+void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const uint32_t* d_run_offsets, uint32_t* d_decoded_items, uint32_t code_size) {
     using BlockRunLengthDecodeT = hipcub::BlockRunLengthDecode<uint32_t, BlockSize, RunsPerThread, DecodedItemsPerThread>;
 
     uint32_t run_items[RunsPerThread];
     uint32_t run_offsets[RunsPerThread];
 
     const unsigned global_thread_idx = BlockSize * hipBlockIdx_x + hipThreadIdx_x;
+
+    if (global_thread_idx >= code_size) return;
+
     hipcub::LoadDirectBlocked(global_thread_idx, d_run_items, run_items);
     hipcub::LoadDirectBlocked(global_thread_idx, d_run_offsets, run_offsets);
 
@@ -139,7 +142,7 @@ void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const ui
         decoded_window_offset += BlockSize * DecodedItemsPerThread;
     }
 }
-template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
+/*template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
 __global__
 __launch_bounds__(BlockSize)
 void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const uint32_t* d_run_offsets, uint32_t* d_decoded_items) {
@@ -153,7 +156,7 @@ void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const ui
         //d_decoded_items[offset + i] = d_run_items[global_thread_idx];
         d_decoded_items[offset + i] = value;
     }
-}
+}*/
 #else
 template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
 __global__
@@ -163,15 +166,13 @@ void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const ui
 
     if (global_thread_idx >= code_size) return;
 
-    // Assuming one thread one run
-    const uint32_t run_length = global_thread_idx == 0 ? d_run_offsets[global_thread_idx] : d_run_offsets[global_thread_idx] - d_run_offsets[global_thread_idx - 1];
+    // Assuming one thread per run
     const uint32_t offset = global_thread_idx == 0 ? 0 : d_run_offsets[global_thread_idx - 1];
+    const uint32_t run_length = d_run_offsets[global_thread_idx] - offset;
     const uint32_t value = d_run_items[global_thread_idx];
 #pragma unroll
     for (int i = 0; i < run_length; i++) {
-        //d_decoded_items[offset + i] = d_run_items[global_thread_idx];
         d_decoded_items[offset + i] = value;
-        //d_decoded_items[global_thread_idx] = offset;
     }
 }
 #endif
