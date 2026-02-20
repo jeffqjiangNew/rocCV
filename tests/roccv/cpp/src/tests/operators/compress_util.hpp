@@ -157,7 +157,9 @@ void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const ui
         d_decoded_items[offset + i] = value;
     }
 }*/
-#else
+#endif
+
+#if 1
 template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
 __global__
 __launch_bounds__(BlockSize)
@@ -169,6 +171,29 @@ void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const ui
     // Assuming one thread per run
     const uint32_t offset = global_thread_idx == 0 ? 0 : d_run_offsets[global_thread_idx - 1];
     const uint32_t run_length = d_run_offsets[global_thread_idx] - offset;
+    const uint32_t value = d_run_items[global_thread_idx];
+#pragma unroll
+    for (int i = 0; i < run_length; i++) {
+        d_decoded_items[offset + i] = value;
+    }
+}
+#else
+template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
+__global__
+__launch_bounds__(BlockSize)
+void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const uint32_t* d_run_offsets, uint32_t* d_decoded_items, uint32_t code_size) {
+    const unsigned global_thread_idx = BlockSize * hipBlockIdx_x + hipThreadIdx_x;
+
+    if (global_thread_idx >= code_size) return;
+
+    __shared__ uint32_t shared_offsets[BlockSize * RunsPerThread];
+    const unsigned local_thread_idx = hipThreadIdx_x;
+    shared_offsets[local_thread_idx] = d_run_offsets[global_thread_idx];
+    __syncthreads();
+
+    // Assuming one thread per run
+    const uint32_t offset = global_thread_idx == 0 ? 0 : (local_thread_idx == 0 ? d_run_offsets[global_thread_idx - 1] : shared_offsets[local_thread_idx - 1]);
+    const uint32_t run_length = shared_offsets[local_thread_idx] - offset;
     const uint32_t value = d_run_items[global_thread_idx];
 #pragma unroll
     for (int i = 0; i < run_length; i++) {
