@@ -37,49 +37,6 @@ using namespace roccv;
 using namespace roccv::tests;
 
 namespace {
-#if 0
-void RunLengthEncodeGolden(uint32_t *input, uint32_t input_size, uint32_t *output, uint32_t* output_size) {
-    int pair_index = 0;
-    int value = input[0];
-    int run_length = 1;
-
-    for (int i = 1; i < input_size; i++) {
-        if (input[i] != value) {
-            output[pair_index * 2] = value;
-            output[pair_index * 2 + 1] = run_length;
-            pair_index++;
-
-            value = input[i];
-            run_length = 1;
-        } else {
-            run_length++;
-        }
-    }
-
-    // Last pair
-    output[pair_index * 2] = value;
-    output[pair_index * 2 + 1] = run_length;
-    pair_index++;
-
-    *output_size = pair_index;
-    // Jefftest
-    /*std::cout << "Golden output array: ";
-    for (int i = 0; i < *output_size; i++) {
-        std::cout << "(" << output[i * 2] << ", " << output[i * 2 + 1] << "), ";
-    }
-    std::cout << std::endl;*/
-}
-
-void GetPrefixSum(hipStream_t stream, uint32_t *d_in, uint32_t *d_out, int num_items) {
-    void* d_temp_storage     = nullptr;
-    size_t temp_storage_bytes = 0;
-
-    HIP_VALIDATE_NO_ERRORS(hipcub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes, d_in, d_out, num_items, stream));
-    HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_temp_storage, temp_storage_bytes));
-    HIP_VALIDATE_NO_ERRORS(hipcub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes, d_in, d_out, num_items, stream));
-    HIP_VALIDATE_NO_ERRORS(hipFree(d_temp_storage));
-}
-#endif
 void RunLengthEncode(std::vector<uint32_t>& in_buffer, std::vector<uint32_t>& out_buffer, uint32_t *code_count) {
     int in_buf_size = in_buffer.size();
     int out_buf_size = out_buffer.size();
@@ -198,35 +155,6 @@ void RunLengthEncodeHipCUB(std::vector<uint32_t>& in_buffer, std::vector<uint32_
 }
 
 #if 0 // Jefftest
-template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
-__global__
-__launch_bounds__(BlockSize)
-void block_run_length_decode_kernel(const uint32_t* d_run_items, const uint32_t* d_run_lengths, uint32_t* d_decoded_items) {
-    using BlockRunLengthDecodeT = hipcub::BlockRunLengthDecode<uint32_t, BlockSize, RunsPerThread, DecodedItemsPerThread>;
-    static constexpr unsigned int decoded_items_per_block = BlockSize * DecodedItemsPerThread;
-    __shared__ typename BlockRunLengthDecodeT::TempStorage temp_storage;
-
-    uint32_t run_items[RunsPerThread];
-    uint32_t run_lengths[RunsPerThread];
-
-    const uint32_t global_thread_idx = BlockSize * hipBlockIdx_x + hipThreadIdx_x;
-    hipcub::LoadDirectBlocked(global_thread_idx, d_run_items, run_items);
-    hipcub::LoadDirectBlocked(global_thread_idx, d_run_lengths, run_lengths);
-
-    uint32_t total_decoded_size{};
-    BlockRunLengthDecodeT block_run_length_decode(temp_storage, run_items, run_lengths, total_decoded_size);
-
-    uint32_t decoded_window_offset = 0;
-    while(decoded_window_offset < total_decoded_size)
-    {
-        uint32_t decoded_items[DecodedItemsPerThread];
-        block_run_length_decode.RunLengthDecode(decoded_items, decoded_window_offset);
-        // Jefftest hipcub::StoreDirectBlocked(global_thread_idx, d_decoded_items + decoded_window_offset, decoded_items, hipcub::Min{}(total_decoded_size - decoded_window_offset, decoded_items_per_block));
-        hipcub::StoreDirectBlocked(global_thread_idx, d_decoded_items + decoded_window_offset, decoded_items);
-        decoded_window_offset += decoded_items_per_block;
-    }
-}
-
 void RunLengthDecodeHipCUB(std::vector<uint32_t>& in_value_buffer, std::vector<uint32_t>& in_run_buffer, std::vector<uint32_t>& out_buffer, uint32_t *out_buffer_size) {
     const uint32_t BlockSize = 32; // Jefftest 64;
     const uint32_t RunsPerThread = 2;
@@ -271,128 +199,8 @@ void RunLengthDecodeHipCUB(std::vector<uint32_t>& in_value_buffer, std::vector<u
 }
 #endif
 
-#if 0
-template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
-__global__
-__launch_bounds__(BlockSize)
-void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const uint32_t* d_run_offsets, uint32_t* d_decoded_items) {
-    using BlockRunLengthDecodeT = hipcub::BlockRunLengthDecode<uint32_t, BlockSize, RunsPerThread, DecodedItemsPerThread>;
-
-    uint32_t run_items[RunsPerThread];
-    uint32_t run_offsets[RunsPerThread];
-
-    const unsigned global_thread_idx = BlockSize * hipBlockIdx_x + hipThreadIdx_x;
-    hipcub::LoadDirectBlocked(global_thread_idx, d_run_items, run_items);
-    hipcub::LoadDirectBlocked(global_thread_idx, d_run_offsets, run_offsets);
-
-    BlockRunLengthDecodeT block_run_length_decode(run_items, run_offsets);
-
-    const uint32_t total_decoded_size = d_run_offsets[(hipBlockIdx_x + 1) * BlockSize * RunsPerThread] - d_run_offsets[hipBlockIdx_x * BlockSize * RunsPerThread];
-    
-    uint32_t decoded_window_offset = 0;
-#pragma unroll
-    while (decoded_window_offset < total_decoded_size)
-    {
-        uint32_t decoded_items[DecodedItemsPerThread];
-        block_run_length_decode.RunLengthDecode(decoded_items, decoded_window_offset);
-        hipcub::StoreDirectBlocked(global_thread_idx, d_decoded_items + decoded_window_offset, decoded_items);
-        decoded_window_offset += BlockSize * DecodedItemsPerThread;
-    }
-}
-template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
-__global__
-__launch_bounds__(BlockSize)
-void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const uint32_t* d_run_offsets, uint32_t* d_decoded_items) {
-    const unsigned global_thread_idx = BlockSize * hipBlockIdx_x + hipThreadIdx_x;
-    // Assuming one thread one run
-    const uint32_t run_length = d_run_offsets[global_thread_idx + 1] - d_run_offsets[global_thread_idx];
-    const uint32_t offset = d_run_offsets[global_thread_idx];
-    const uint32_t value = d_run_items[global_thread_idx];
-#pragma unroll
-    for (int i = 0; i < run_length; i++) {
-        //d_decoded_items[offset + i] = d_run_items[global_thread_idx];
-        d_decoded_items[offset + i] = value;
-    }
-}
-//#else
-template<uint32_t BlockSize, uint32_t RunsPerThread, uint32_t DecodedItemsPerThread>
-__global__
-__launch_bounds__(BlockSize)
-void block_run_length_decode_kernel_offset(const uint32_t* d_run_items, const uint32_t* d_run_offsets, uint32_t* d_decoded_items, uint32_t code_size) {
-    const unsigned global_thread_idx = BlockSize * hipBlockIdx_x + hipThreadIdx_x;
-
-    if (global_thread_idx >= code_size) return;
-
-    // Assuming one thread one run
-    const uint32_t run_length = global_thread_idx == 0 ? d_run_offsets[global_thread_idx] : d_run_offsets[global_thread_idx] - d_run_offsets[global_thread_idx - 1];
-    const uint32_t offset = global_thread_idx == 0 ? 0 : d_run_offsets[global_thread_idx - 1];
-    const uint32_t value = d_run_items[global_thread_idx];
-#pragma unroll
-    for (int i = 0; i < run_length; i++) {
-        //d_decoded_items[offset + i] = d_run_items[global_thread_idx];
-        d_decoded_items[offset + i] = value;
-        //d_decoded_items[global_thread_idx] = offset;
-    }
-}
-#endif
-
-#if 0
-void RunLengthDecodeHipCUB_Offset(std::vector<uint32_t>& in_value_buffer, std::vector<uint32_t>& in_run_buffer, std::vector<uint32_t>& out_buffer, uint32_t *out_buffer_size) {
-    const uint32_t BlockSize = 32; // 256; // Jefftest 64;
-    const uint32_t RunsPerThread = 1; // 2;
-    const uint32_t DecodedItemsPerThread = 1; // 2;
-    constexpr auto runs_per_block  = BlockSize * RunsPerThread;
-
-    uint32_t *d_value_buf = nullptr;
-    uint32_t *d_offset_buf = nullptr;
-    uint32_t *d_decoded_buf = nullptr;
-
-    uint32_t in_code_size = in_value_buffer.size();
-    std::vector<uint32_t> in_offset_buffer(in_code_size + 1);
-    // Use CPU to get offset buffer. Note this is just for testing purpose.
-    in_offset_buffer[0] = 0;
-    for (int i = 1; i < in_code_size + 1; i++) {
-        in_offset_buffer[i] = in_offset_buffer[i - 1] + in_run_buffer[i - 1];
-    }
-
-    HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_value_buf, in_value_buffer.size() * sizeof(in_value_buffer[0])));
-    HIP_VALIDATE_NO_ERRORS(hipMemcpy(d_value_buf, in_value_buffer.data(), in_value_buffer.size() * sizeof(in_value_buffer[0]), hipMemcpyHostToDevice));
-    HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_offset_buf, in_offset_buffer.size() * sizeof(in_offset_buffer[0])));
-    HIP_VALIDATE_NO_ERRORS(hipMemcpy(d_offset_buf, in_offset_buffer.data(), in_offset_buffer.size() * sizeof(in_offset_buffer[0]), hipMemcpyHostToDevice));
-
-    uint32_t dec_buf_size = in_offset_buffer.back();
-    HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_decoded_buf, dec_buf_size * sizeof(uint32_t)));
-
-    hipStream_t stream;
-    HIP_VALIDATE_NO_ERRORS(hipStreamCreate(&stream));
-
-    for (int i = 0; i < 10; i++) {
-        auto start = std::chrono::high_resolution_clock::now();
-
-        uint32_t num_blocks = (in_code_size + runs_per_block - 1) / runs_per_block;
-        block_run_length_decode_kernel_offset<BlockSize, RunsPerThread, DecodedItemsPerThread><<<dim3(num_blocks), dim3(BlockSize), 0, stream>>>(d_value_buf, d_offset_buf, d_decoded_buf);
-        HIP_VALIDATE_NO_ERRORS(hipStreamSynchronize(stream));
-
-        auto end = std::chrono::high_resolution_clock::now();
-        auto elapsed = std::chrono::duration<double, std::milli>(end - start).count();
-        std::cout << "<Profiling> hipStreamSynchronize() elapsed time for iteration " << i << ": " << elapsed << " ms" << std::endl;
-        float throughput = dec_buf_size * sizeof(uint32_t) / 1000.0 / 1000.0 / 1000.0 * 1000.0 / elapsed;
-        std::cout << "<Profiling> RunLengthDecodeHipCUB_Offset throughput based on C++ Chrono lib for iteration " << i << ": " << throughput << " GB/s" << std::endl;
-    }
-
-    out_buffer.resize(dec_buf_size);
-    HIP_VALIDATE_NO_ERRORS(hipMemcpy(out_buffer.data(), d_decoded_buf, dec_buf_size * sizeof(uint32_t), hipMemcpyDeviceToHost));
-    *out_buffer_size = dec_buf_size;
-
-    // Jefftest
-    /*for (int i = dec_buf_size - 256; i < dec_buf_size; i++) {
-        std::cout << out_buffer[i] << " ";
-    }
-    std::cout << std::endl;*/
-}
-#else
 void RunLengthDecodeHipCUB_OffsetGPU(std::vector<uint32_t>& in_value_buffer, std::vector<uint32_t>& in_run_buffer, std::vector<uint32_t>& out_buffer, uint32_t *out_buffer_size) {
-    const uint32_t BlockSize = 64; // 256; // Jefftest 64;
+    const uint32_t BlockSize =  256; // 256; // Jefftest 64;
     const uint32_t RunsPerThread = 1; // 2;
     const uint32_t DecodedItemsPerThread = 1; // 2;
     constexpr auto runs_per_block  = BlockSize * RunsPerThread;
@@ -457,7 +265,6 @@ void RunLengthDecodeHipCUB_OffsetGPU(std::vector<uint32_t>& in_value_buffer, std
     }
     std::cout << std::endl;*/
 }
-#endif
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -474,7 +281,7 @@ int main(int argc, char **argv) {
         } else {
             in_buffer[i] = i / 5;
         }*/
-        in_buffer[i] = i / 6;
+        in_buffer[i] = i / 10;
     }
 
     printf("Input size = %d\n", in_count);
