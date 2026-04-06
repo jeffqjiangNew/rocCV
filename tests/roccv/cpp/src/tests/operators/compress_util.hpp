@@ -22,6 +22,7 @@
 #include <core/hip_assert.h>
 #include <hipcub/device/device_scan.hpp>
 #include <hipcub/device/device_scan.hpp>
+#include <hipcub/device/device_reduce.hpp>
 #include <hipcub/device/device_run_length_encode.hpp>
 #include <hipcub/block/block_load.hpp>
 #include <hipcub/block/block_run_length_decode.hpp>
@@ -60,6 +61,142 @@ void RunLengthEncodeGolden(uint32_t *input, uint32_t input_size, uint32_t *outpu
     std::cout << std::endl;*/
 }
 
+void RunLengthEncodeCPU(uint32_t *input, uint32_t input_size, uint32_t *output_values, uint32_t *output_runs, uint32_t* output_size) {
+    int pair_index = 0;
+    int value = input[0];
+    int run_length = 1;
+
+    for (int i = 1; i < input_size; i++) {
+        if (input[i] != value) {
+            output_values[pair_index] = value;
+            output_runs[pair_index] = run_length;
+            pair_index++;
+
+            value = input[i];
+            run_length = 1;
+        } else {
+            run_length++;
+        }
+    }
+
+    // Last pair
+    output_values[pair_index] = value;
+    output_runs[pair_index] = run_length;
+    pair_index++;
+
+    *output_size = pair_index;
+    // Jefftest
+    std::cout << "RLE value array: ";
+    for (int i = 0; i < *output_size; i++) {
+        std::cout << output_values[i] << ", ";
+    }
+    std::cout << std::endl;
+    std::cout << "RLE run array: ";
+    for (int i = 0; i < *output_size; i++) {
+        std::cout << output_runs[i] << ", ";
+    }
+    std::cout << std::endl;
+}
+
+void RunLengthDecodeCPU(uint32_t *input_values, uint32_t *input_runs, uint32_t code_size, uint32_t *output, uint32_t* output_size) {
+    uint32_t output_index = 0;
+
+    for (uint32_t i = 0; i < code_size; i++) {
+        for (uint32_t j = 0; j < input_runs[i]; j++) {
+            output[output_index] = input_values[i];
+            output_index++;
+        }
+    }
+
+    *output_size = output_index;
+}
+
+
+void DeltaEncodeCPU(uint32_t *input, uint32_t input_size, uint32_t *output) {
+    uint32_t prev_value = input[0];
+    output[0] = input[0];
+    for (int i = 1; i < input_size; i++) {
+        output[i] = input[i] - prev_value;
+        prev_value = input[i];
+    }
+    // Jefftest
+    std::cout << "Delta encoded output array: ";
+    for (int i = 0; i < input_size; i++) {
+        // std::cout << output[i] << " ";
+        std::cout << static_cast<int32_t>(output[i]) << " ";
+    }
+    std::cout << std::endl;
+}
+
+void DeltaDecodeCPU(uint32_t *input, uint32_t input_size, uint32_t *output) {
+    uint32_t prev_value = input[0];
+    output[0] = input[0];
+    for (int i = 1; i < input_size; i++) {
+        output[i] = prev_value + input[i];
+        prev_value = output[i];
+    }
+
+    // Jefftest
+    /*std::cout << "Delta decoded output array: ";
+    for (int i = 0; i < input_size; i++) {
+        std::cout << output[i] << " ";
+    }
+    std::cout << std::endl;*/
+}
+
+// Bit packing: fixed B bits per value, LSB-first into byte stream.
+inline uint32_t BitPackOutputBytes(uint32_t num_items, int bits_per_value) {
+    return (num_items * static_cast<uint32_t>(bits_per_value) + 7u) / 8u;
+}
+
+void BitPackCPU(uint32_t* input, uint32_t input_size, uint8_t* output, uint32_t* output_byte_size, int bits_per_value = 8) {
+    const uint32_t mask = (1u << bits_per_value) - 1u;
+    uint32_t bit_cursor = 0;
+    for (uint32_t i = 0; i < input_size; i++) {
+        uint32_t v = input[i] & mask;
+        for (int b = 0; b < bits_per_value; b++) {
+            uint32_t byte_idx = bit_cursor / 8;
+            int bit_idx = bit_cursor % 8;
+            if (v & (1u << b))
+                output[byte_idx] |= static_cast<uint8_t>(1u << bit_idx);
+            bit_cursor++;
+        }
+    }
+    *output_byte_size = BitPackOutputBytes(input_size, bits_per_value);
+}
+
+void BitUnpackCPU(uint8_t* input, uint32_t input_byte_size, uint32_t* output, uint32_t output_size, int bits_per_value = 8) {
+    uint32_t bit_cursor = 0;
+    const uint32_t total_bits = output_size * static_cast<uint32_t>(bits_per_value);
+    for (uint32_t i = 0; i < output_size; i++) {
+        uint32_t v = 0;
+        for (int b = 0; b < bits_per_value; b++) {
+            if (bit_cursor >= total_bits) break;
+            uint32_t byte_idx = bit_cursor / 8;
+            int bit_idx = bit_cursor % 8;
+            if (byte_idx < input_byte_size && (input[byte_idx] & (1u << bit_idx)))
+                v |= 1u << b;
+            bit_cursor++;
+        }
+        output[i] = v;
+    }
+}
+
+// Minimum number of bits needed to represent max_val (1..32). Use after finding max of array.
+inline int BitsForMax(uint32_t max_val) {
+    if (max_val == 0u) return 1;
+    return 32 - __builtin_clz(max_val);
+}
+
+// Host: scan array once, return bits_per_value so all values fit.
+inline int BitsPerValueFromArrayCPU(const uint32_t* input, uint32_t n) {
+    if (n == 0u) return 1;
+    uint32_t max_val = input[0];
+    for (uint32_t i = 1; i < n; i++)
+        if (input[i] > max_val) max_val = input[i];
+    return BitsForMax(max_val);
+}
+
 void GetPrefixSumHipCUB(hipStream_t stream, uint32_t *d_in, uint32_t *d_out, int num_items) {
     void* d_temp_storage     = nullptr;
     size_t temp_storage_bytes = 0;
@@ -78,6 +215,76 @@ void RunLengthEncodeHipCUB(hipStream_t stream, uint32_t *d_in, uint32_t* d_value
     HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_temp_storage, temp_storage_bytes));
     HIP_VALIDATE_NO_ERRORS(hipcub::DeviceRunLengthEncode::Encode(d_temp_storage, temp_storage_bytes, d_in, d_value_out, d_run_out, d_runs_count_output, in_buf_size, stream));
     HIP_VALIDATE_NO_ERRORS(hipFree(d_temp_storage));
+}
+
+void MaxValueDevice(hipStream_t stream, const uint32_t* d_in, uint32_t num_items, uint32_t* d_max) {
+    if (num_items == 0u) {
+        HIP_VALIDATE_NO_ERRORS(hipMemset(d_max, 0, sizeof(uint32_t)));
+        return;
+    }
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    HIP_VALIDATE_NO_ERRORS(hipcub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, d_in, d_max, static_cast<int>(num_items), stream));
+    HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_temp_storage, temp_storage_bytes));
+    HIP_VALIDATE_NO_ERRORS(hipcub::DeviceReduce::Max(d_temp_storage, temp_storage_bytes, d_in, d_max, static_cast<int>(num_items), stream));
+    HIP_VALIDATE_NO_ERRORS(hipFree(d_temp_storage));
+}
+
+int BitsPerValueFromArrayDevice(hipStream_t stream, const uint32_t* d_in, uint32_t num_items) {
+    if (num_items == 0u) return 1;
+    uint32_t* d_max = nullptr;
+    HIP_VALIDATE_NO_ERRORS(hipMalloc(&d_max, sizeof(uint32_t)));
+    MaxValueDevice(stream, d_in, num_items, d_max);
+    uint32_t max_val = 0u;
+    HIP_VALIDATE_NO_ERRORS(hipMemcpy(&max_val, d_max, sizeof(uint32_t), hipMemcpyDeviceToHost));
+    HIP_VALIDATE_NO_ERRORS(hipFree(d_max));
+    return BitsForMax(max_val);
+}
+
+__global__ void bit_pack_kernel(const uint32_t* __restrict__ d_in, uint8_t* __restrict__ d_out, uint32_t num_items, int bits_per_value) {
+    const uint32_t total_bytes = (num_items * bits_per_value + 7) / 8;
+    for (uint32_t k = hipBlockIdx_x * hipBlockDim_x + hipThreadIdx_x; k < total_bytes; k += hipGridDim_x * hipBlockDim_x) {
+        uint8_t byte_val = 0;
+        const uint32_t first_bit = k * 8u;
+        const uint32_t last_bit = first_bit + 7u;
+        for (uint32_t s = first_bit; s <= last_bit && s < num_items * static_cast<uint32_t>(bits_per_value); s++) {
+            uint32_t e = s / bits_per_value;
+            int bit_in_elem = s - e * bits_per_value;
+            if ((d_in[e] >> bit_in_elem) & 1u)
+                byte_val |= static_cast<uint8_t>(1u << (s - first_bit));
+        }
+        d_out[k] = byte_val;
+    }
+}
+
+__global__ void bit_unpack_kernel(const uint8_t* __restrict__ d_in, uint32_t* __restrict__ d_out, uint32_t num_items, int bits_per_value) {
+    for (uint32_t i = hipBlockIdx_x * hipBlockDim_x + hipThreadIdx_x; i < num_items; i += hipGridDim_x * hipBlockDim_x) {
+        uint32_t v = 0;
+        const uint32_t start_bit = i * bits_per_value;
+        for (int b = 0; b < bits_per_value; b++) {
+            uint32_t s = start_bit + b;
+            uint32_t byte_idx = s / 8;
+            int bit_idx = s % 8;
+            if ((d_in[byte_idx] >> bit_idx) & 1u)
+                v |= 1u << b;
+        }
+        d_out[i] = v;
+    }
+}
+
+void BitPackDevice(hipStream_t stream, const uint32_t* d_in, uint32_t num_items, uint8_t* d_out, int bits_per_value = 8) {
+    if (num_items == 0) return;
+    const uint32_t total_bytes = BitPackOutputBytes(num_items, bits_per_value);
+    const uint32_t block_size = 256u;
+    const uint32_t num_blocks = (total_bytes + block_size - 1u) / block_size;
+    bit_pack_kernel<<<num_blocks, block_size, 0, stream>>>(d_in, d_out, num_items, bits_per_value);
+}
+
+void BitUnpackDevice(hipStream_t stream, const uint8_t* d_in, uint32_t packed_byte_size, uint32_t* d_out, uint32_t num_items, int bits_per_value = 8) {
+    if (num_items == 0) return;
+    const uint32_t block_size = 256u;
+    const uint32_t num_blocks = (num_items + block_size - 1u) / block_size;
+    bit_unpack_kernel<<<num_blocks, block_size, 0, stream>>>(d_in, d_out, num_items, bits_per_value);
 }
 
 #if 0 // Jefftest

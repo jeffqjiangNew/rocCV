@@ -19,6 +19,7 @@
  * THE SOFTWARE.
  */
 
+#include <fstream>
 #include <hipcub/device/device_scan.hpp>
 //#include <core/detail/casting.hpp>
 //#include <core/detail/type_traits.hpp>
@@ -267,8 +268,8 @@ void RunLengthDecodeHipCUB_OffsetGPU(std::vector<uint32_t>& in_value_buffer, std
 }
 }  // namespace
 
-int main(int argc, char **argv) {
-    printf("Running compress test ...\n");
+void TestRLE() {
+    printf("Running RLE compress/decompress test ...\n");
     //std::vector<uint32_t> in_buffer = {1,2,3,6,6,6,5,5};
 
     // Create a vector and fill it with random data.
@@ -329,4 +330,135 @@ int main(int argc, char **argv) {
     RunLengthDecodeHipCUB_OffsetGPU(out_value_buffer, out_run_buffer, out_buffer_3, &dec_out_size);
     std::cout << "Decode buffer size: " << dec_out_size << std::endl;
     CompareVectorsNear(out_buffer_3, in_buffer, 0);
+}
+
+void CascadeEncode(std::vector<uint32_t>& in_buffer, std::vector<uint8_t>& value_buffer, uint32_t *value_buffer_size, std::vector<uint8_t>& run_buffer, uint32_t *run_buffer_size) {
+    uint32_t in_buf_size = in_buffer.size();
+    uint32_t max_out_buf_size = in_buf_size * sizeof(in_buffer[0]); // out buffer type is uint8_t
+    value_buffer.resize(max_out_buf_size);
+    run_buffer.resize(max_out_buf_size);
+
+    // RLE encode
+    std::vector<uint32_t> rle_value_buffer(in_buf_size);
+    std::vector<uint32_t> rle_run_buffer(in_buf_size);
+    uint32_t rle_code_size = 0;
+    RunLengthEncodeCPU(in_buffer.data(), in_buf_size, reinterpret_cast<uint32_t*>(rle_value_buffer.data()), reinterpret_cast<uint32_t*>(rle_run_buffer.data()), &rle_code_size);
+
+    // Delta encode
+    std::vector<uint32_t> delta_value_buffer(rle_code_size);
+    std::vector<uint32_t> delta_run_buffer(rle_code_size);
+    DeltaEncodeCPU(reinterpret_cast<uint32_t*>(rle_value_buffer.data()), rle_code_size, reinterpret_cast<uint32_t*>(delta_value_buffer.data()));
+    DeltaEncodeCPU(reinterpret_cast<uint32_t*>(rle_run_buffer.data()), rle_code_size, reinterpret_cast<uint32_t*>(delta_run_buffer.data()));
+
+    // Bit pack encode
+    int bits = BitsPerValueFromArrayCPU(in_buffer.data(), in_buf_size);
+    //BitPackCPU(in_buffer.data(), in_buf_size, reinterpret_cast<uint8_t*>(value_buffer.data()), reinterpret_cast<uint32_t*>(value_buffer_size), bits);
+    //BitPackCPU(in_buffer.data(), in_buf_size, reinterpret_cast<uint8_t*>(run_buffer.data()), reinterpret_cast<uint32_t*>(run_buffer_size), bits);
+    
+    // Copy the delta_value_buffer contents into value_buffer (uint8_t format)
+    std::memcpy(value_buffer.data(), delta_value_buffer.data(), rle_code_size * sizeof(uint32_t));
+    // Copy the delta_run_buffer contents into run_buffer (uint8_t format)
+    std::memcpy(run_buffer.data(), delta_run_buffer.data(), rle_code_size * sizeof(uint32_t));
+    *value_buffer_size = rle_code_size * sizeof(in_buffer[0]);
+    *run_buffer_size = rle_code_size * sizeof(in_buffer[0]);
+
+    value_buffer.resize(*value_buffer_size);
+    run_buffer.resize(*run_buffer_size);
+}
+
+void CascadeDecode(std::vector<uint8_t>& value_buffer, uint32_t value_buffer_size, std::vector<uint8_t>& run_buffer, uint32_t run_buffer_size, std::vector<uint32_t>& dec_buffer, uint32_t *dec_buf_size) {
+
+    // Delta decode
+    uint32_t code_size = value_buffer_size / sizeof(uint32_t);
+    std::vector<uint32_t> rle_value_buffer(code_size);
+    std::vector<uint32_t> rle_run_buffer(code_size);
+    DeltaDecodeCPU(reinterpret_cast<uint32_t*>(value_buffer.data()), code_size, reinterpret_cast<uint32_t*>(rle_value_buffer.data()));
+    DeltaDecodeCPU(reinterpret_cast<uint32_t*>(run_buffer.data()), code_size, reinterpret_cast<uint32_t*>(rle_run_buffer.data()));
+
+    // RLE decode
+    RunLengthDecodeCPU(reinterpret_cast<uint32_t*>(rle_value_buffer.data()), reinterpret_cast<uint32_t*>(rle_run_buffer.data()), code_size, reinterpret_cast<uint32_t*>(dec_buffer.data()), dec_buf_size); 
+    
+}
+
+int main(int argc, char **argv) {
+
+    std::string input_filename;
+    std::vector<uint32_t> input_data;
+
+    if (argc > 1) {
+        for (int i = 1; i < argc; ++i) {
+            if ((std::string(argv[i]) == "-i" || std::string(argv[i]) == "--input") && i + 1 < argc) {
+                input_filename = argv[i + 1];
+                ++i; // Skip filename
+            }
+            else if ((std::string(argv[i]) == "-t" || std::string(argv[i]) == "--type") && i + 1 < argc) {
+                std::string data_type = argv[i + 1];
+                std::cout << "Data type specified: " << data_type << std::endl;
+                ++i; // Skip type argument
+            }
+        }
+    } else {
+        std::cout << "No input file specified. Usage: " << argv[0] << " <input_file>" << std::endl;
+        return 1;
+    }
+    if (!input_filename.empty()) {
+        std::cout << "Input file provided: " << input_filename << std::endl;
+        std::ifstream infile(input_filename, std::ios::binary);
+        if (!infile.is_open()) {
+            std::cerr << "Error: Could not open input file '" << input_filename << "'." << std::endl;
+            return 1;
+        }
+        // For an ASCII file, where each line is a decimal integer, read line by line and fill a vector<uint32_t>
+        std::string line;
+        while (std::getline(infile, line)) {
+            if (!line.empty()) {
+                //std::cout << "Read line: " << line << std::endl; // Jefftest
+                try {
+                    uint32_t value = static_cast<uint32_t>(std::stoul(line));
+                    //std::cout << "Read value: " << value << std::endl; // Jefftest
+                    input_data.push_back(value);
+                } catch (const std::invalid_argument& e) {
+                    std::cerr << "Warning: Failed to parse line as integer: '" << line << "'" << std::endl;
+                } catch (const std::out_of_range& e) {
+                    //std::cerr << "Warning: Value out of uint32_t range: '" << line << "'" << std::endl;
+                    std::cout << "Warning: Value out of uint32_t range: '" << line << "'" << std::endl;
+                }
+            }
+        }
+        infile.close();
+
+        std::cout << "Input data size: " << input_data.size() << " elements" << std::endl;
+    } else {
+        std::cout << "No input file (-i <filename>) specified." << std::endl;
+    }
+
+    TestRLE();
+
+    #if 0
+    uint32_t in_count = 1024;
+    std::vector<uint32_t> in_buffer(in_count);
+    //FillVector(in_buffer);
+    for (int i = 0; i < in_count; i++) {
+        /*if ( i < in_count / 2) {
+            in_buffer[i] = i / 2;
+        } else {
+            in_buffer[i] = i / 5;
+        }*/
+        in_buffer[i] = i / 10;
+    }
+    #endif
+    uint32_t in_count = input_data.size();
+    std::vector<uint8_t> enc_value_buffer;
+    uint32_t enc_value_buf_size;
+    std::vector<uint8_t> enc_run_buffer;
+    uint32_t enc_run_buf_size;
+    CascadeEncode(input_data, enc_value_buffer, &enc_value_buf_size, enc_run_buffer, &enc_run_buf_size);
+    std::cout << "Compression ratio: " << static_cast<float>(in_count * sizeof(input_data[0])) / static_cast<float>(enc_value_buf_size + enc_run_buf_size)  << std::endl;
+
+    std::vector<uint32_t> dec_buffer(in_count);
+    uint32_t dec_buf_size = 0;
+    CascadeDecode(enc_value_buffer, enc_value_buf_size, enc_run_buffer, enc_run_buf_size, dec_buffer, &dec_buf_size);
+    CompareVectorsNear(dec_buffer, input_data, 0);
+
+    return 0;
 }
